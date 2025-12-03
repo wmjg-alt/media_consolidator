@@ -1,10 +1,11 @@
+"""Media consolidation and deduplication orchestrator."""
+
 import argparse
 import logging
 import os
-import sys
-from pathlib import Path
+from typing import Any
 
-from src.utils import load_config, setup_logger
+from src.utils import load_config, setup_logger, normalize_path
 from src.db import DatabaseManager
 from src.crawler import FileCrawler
 from src.hasher import Fingerprinter
@@ -14,7 +15,10 @@ from src.executioner import Executioner
 
 CONFIG_PATH = "config/settings.yaml"
 
-def main():
+
+def main() -> None:
+    """Execute media consolidation workflow based on command-line arguments."""
+    logger = logging.getLogger("MediaConsolidator.Main")
     parser = argparse.ArgumentParser(description="Media Consolidator: Organize and Deduplicate.")
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
     
@@ -32,7 +36,6 @@ def main():
     
     args = parser.parse_args()
     
-    # 1. Setup & Path Normalization
     if not os.path.exists(CONFIG_PATH):
         print("ERROR: config/settings.yaml not found.")
         return
@@ -42,9 +45,6 @@ def main():
     
     db_path = config['app']['db_name']
 
-    # === STATELESS MODE ===
-    # We delete the DB at start to ensure we don't have stale data 
-    # from files that were moved in a previous run.
     if os.path.exists(db_path):
         try:
             os.remove(db_path)
@@ -56,10 +56,8 @@ def main():
     db = DatabaseManager(db_path)
     db.initialize_schema()
     
-    # 2. Resolve Folders
-    scan_roots = []
+    scan_roots: list[str] = []
     
-    # A. Get Target Dir (Always include)
     target_root = config['organization']['target_root']
     if not os.path.exists(target_root):
         try:
@@ -69,10 +67,7 @@ def main():
             pass
     scan_roots.append(target_root)
     
-    # B. Get Source Dirs
     if hasattr(args, 'roots') and args.roots:
-        # User provided CLI overrides, normalize them too
-        from src.utils import normalize_path
         scan_roots.extend([normalize_path(p) for p in args.roots])
     else:
         cfg_sources = config['organization'].get('source_dirs', [])
@@ -84,55 +79,112 @@ def main():
     logger.info(f"Target Root: {target_root}")
     logger.info(f"Scan Scope: {scan_roots}")
 
-    # 3. Execution Flow
     if args.command == "all":
-        run_scan(db, config, scan_roots)
-        run_hash(db, config)
-        run_analyze(db, config)
-        run_plan(db, config)
+        run_scan(db, config, scan_roots, logger)
+        run_hash(db, config, logger)
+        run_analyze(db, config, logger)
+        run_plan(db, config, logger)
         
         if perform_audit(db, logger):
-            run_exec(db, config, not args.live)
+            run_exec(db, config, not args.live, logger)
         else:
             logger.error("AUDIT FAILED. Aborting.")
             
-    # (Keep individual commands if you want, but 'all' is the focus)
     elif args.command == "scan":
-        run_scan(db, config, scan_roots)
+        run_scan(db, config, scan_roots, logger)
     elif args.command == "hash":
-        run_hash(db, config)
+        run_hash(db, config, logger)
     elif args.command == "analyze":
-        run_analyze(db, config)
+        run_analyze(db, config, logger)
     elif args.command == "plan":
-        run_plan(db, config)
+        run_plan(db, config, logger)
     elif args.command == "execute":
-        run_exec(db, config, not args.live)
+        run_exec(db, config, not args.live, logger)
     else:
         parser.print_help()
 
-# --- Phase Wrappers (Same as before) ---
-def run_scan(db, config, roots):
+
+def run_scan(
+    db: DatabaseManager,
+    config: dict[str, Any],
+    roots: list[str],
+    logger: logging.Logger,
+) -> None:
+    """Scan specified root directories and index media files.
+    
+    Args:
+        db: Database manager instance.
+        config: Configuration dictionary.
+        roots: List of root directories to scan.
+        logger: Logger instance.
+    """
     crawler = FileCrawler(db, config)
     count = crawler.scan_roots(roots)
-    print(f"Phase 2 Complete. Scanned {count} files.")
+    logger.info(f"File scan complete. Indexed {count} files.")
 
-def run_hash(db, config):
+
+def run_hash(
+    db: DatabaseManager,
+    config: dict[str, Any],
+    logger: logging.Logger,
+) -> None:
+    """Generate fingerprints for indexed files.
+    
+    Args:
+        db: Database manager instance.
+        config: Configuration dictionary.
+        logger: Logger instance.
+    """
     hasher = Fingerprinter(db, config)
     hasher.process_database()
-    print("Phase 3 Complete. Fingerprinting done.")
+    logger.info("Fingerprinting complete.")
 
-def run_analyze(db, config):
+
+def run_analyze(
+    db: DatabaseManager,
+    config: dict[str, Any],
+    logger: logging.Logger,
+) -> None:
+    """Analyze file metadata and identify duplicates.
+    
+    Args:
+        db: Database manager instance.
+        config: Configuration dictionary.
+        logger: Logger instance.
+    """
     analyzer = Analyzer(db, config)
     analyzer.process_metadata()
     analyzer.process_duplicates()
-    print("Phase 4 Complete. Analysis done.")
+    logger.info("Analysis complete.")
 
-def run_plan(db, config):
+
+def run_plan(
+    db: DatabaseManager,
+    config: dict[str, Any],
+    logger: logging.Logger,
+) -> None:
+    """Generate file organization plan.
+    
+    Args:
+        db: Database manager instance.
+        config: Configuration dictionary.
+        logger: Logger instance.
+    """
     librarian = Librarian(db, config)
     librarian.generate_organization_plan()
-    print("Phase 5 Complete. Plan generated.")
+    logger.info("Organization plan generated.")
 
-def perform_audit(db, logger) -> bool:
+
+def perform_audit(db: DatabaseManager, logger: logging.Logger) -> bool:
+    """Verify that all files have valid dispositions before execution.
+    
+    Args:
+        db: Database manager instance.
+        logger: Logger instance.
+        
+    Returns:
+        True if audit passes, False otherwise.
+    """
     logger.info("--- PRE-FLIGHT SANITY CHECK ---")
     with db.get_connection() as conn:
         total = conn.execute("SELECT COUNT(*) FROM media_files").fetchone()[0]
@@ -155,10 +207,24 @@ def perform_audit(db, logger) -> bool:
     logger.info("AUDIT PASS: All files accounted for.")
     return True
 
-def run_exec(db, config, dry_run):
+
+def run_exec(
+    db: DatabaseManager,
+    config: dict[str, Any],
+    dry_run: bool,
+    logger: logging.Logger,
+) -> None:
+    """Execute file organization plan.
+    
+    Args:
+        db: Database manager instance.
+        config: Configuration dictionary.
+        dry_run: If True, simulate execution without moving files.
+        logger: Logger instance.
+    """
     executioner = Executioner(db, config, dry_run=dry_run)
     executioner.execute()
-    print("Phase 6 Complete.")
+    logger.info("Execution complete.")
 
 if __name__ == "__main__":
     main()

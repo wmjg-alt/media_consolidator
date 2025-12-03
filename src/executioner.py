@@ -1,14 +1,36 @@
+"""File movement execution with dry-run support and audit trails."""
+
+import logging
 import os
 import shutil
-import logging
-import sqlite3
-from pathlib import Path
 from collections import defaultdict
 from datetime import datetime
+from typing import Any
+
 from src.db import DatabaseManager
 
+
 class Executioner:
-    def __init__(self, db: DatabaseManager, config: dict, dry_run: bool = True):
+    """Execute file organization plan by moving files to target locations.
+    
+    Moves files marked KEEP to organized locations and moves duplicates to
+    trash. Supports dry-run mode for safe testing. Writes audit trails
+    (trace receipts) to source folders documenting all file operations.
+    """
+
+    def __init__(
+        self,
+        db: DatabaseManager,
+        config: dict[str, Any],
+        dry_run: bool = True,
+    ) -> None:
+        """Initialize the executioner.
+        
+        Args:
+            db: Database manager instance.
+            config: Configuration dictionary containing organization.trash_folder.
+            dry_run: If True, log operations without moving files. Defaults to True.
+        """
         self.db = db
         self.logger = logging.getLogger("MediaConsolidator.Executioner")
         self.dry_run = dry_run
@@ -16,9 +38,14 @@ class Executioner:
         org_cfg = config.get("organization", {})
         self.trash_root = org_cfg.get("trash_folder", "C:/MediaConsolidator_Trash")
         
-        self.receipt_buffer = defaultdict(list)
+        self.receipt_buffer: dict[str, list[str]] = defaultdict(list)
 
-    def execute(self):
+    def execute(self) -> None:
+        """Execute the complete file organization plan.
+        
+        Processes files in two phases: moves KEEP files to organized locations,
+        then moves DELETE files to trash. Writes audit trails to source folders.
+        """
         mode = "DRY RUN" if self.dry_run else "LIVE"
         self.logger.info(f"Starting Execution Phase. Mode: {mode}")
         
@@ -28,8 +55,14 @@ class Executioner:
         
         self.logger.info("Execution Phase Complete.")
 
-    def _process_keepers(self):
-        sql = "SELECT id, file_path, target_path FROM media_files WHERE disposition = 'KEEP' AND target_path IS NOT NULL"
+    def _process_keepers(self) -> None:
+        """Move files marked KEEP to their organized target locations.
+        
+        Only writes audit receipts for files that were actually moved,
+        skipping receipts for files already in place or that failed to move.
+        """
+        sql = """SELECT id, file_path, target_path FROM media_files 
+                 WHERE disposition = 'KEEP' AND target_path IS NOT NULL"""
         with self.db.get_connection() as conn:
             rows = conn.execute(sql).fetchall()
             self.logger.info(f"Processing {len(rows)} Keepers...")
@@ -38,11 +71,16 @@ class Executioner:
                     self.logger.info(f"[DRY] Move: '{src}' -> '{dst}'")
                     continue
                 
-                # FIX: Only log receipt if _safe_move returns True (actually moved)
                 if self._safe_move(src, dst):
                     self._log_receipt(src, f"[MOVED] '{os.path.basename(src)}' -> '{dst}'")
 
-    def _process_deletes(self):
+    def _process_deletes(self) -> None:
+        """Move duplicate files to trash.
+        
+        Identifies duplicates of KEEP files via full hash matching and moves
+        them to the trash folder. Audit receipts distinguish between pure
+        duplicates (consolidated) and orphaned files.
+        """
         sql = """
         SELECT t1.id, t1.file_path, t2.target_path 
         FROM media_files t1
@@ -60,19 +98,35 @@ class Executioner:
                     continue
                 
                 if self._safe_move(src, trash_path):
-                    msg = f"[DUPLICATE CONSOLIDATED] '{filename}' -> '{winner_dst}'" if winner_dst else f"[MOVED TO TRASH] '{filename}'"
+                    msg = (
+                        f"[DUPLICATE CONSOLIDATED] '{filename}' -> '{winner_dst}'"
+                        if winner_dst
+                        else f"[MOVED TO TRASH] '{filename}'"
+                    )
                     self._log_receipt(src, msg)
 
     def _safe_move(self, src: str, dst: str) -> bool:
-        """Returns True if file was physically moved, False if skipped."""
+        """Safely move a file with validation and error handling.
+        
+        Verifies source exists, detects no-op moves (already in place),
+        creates destination directories, and handles errors gracefully.
+        Files already at their target location are not moved but return False
+        to prevent writing redundant audit receipts.
+        
+        Args:
+            src: Source file path.
+            dst: Destination file path.
+            
+        Returns:
+            True if file was physically moved, False if skipped or failed.
+        """
         try:
             abs_src = os.path.abspath(src)
             abs_dst = os.path.abspath(dst)
 
             if abs_src == abs_dst:
-                # Log at debug level to keep console clean
                 self.logger.debug(f"Skipping move (Already in place): {src}")
-                return False # <--- CRITICAL FIX: Returns False so we don't write a receipt
+                return False
 
             if not os.path.exists(src):
                 self.logger.warning(f"Source file missing: {src}")
@@ -86,11 +140,25 @@ class Executioner:
             self.logger.error(f"Move failed: {src} -> {dst} | Error: {e}")
             return False
 
-    def _log_receipt(self, src_path: str, message: str):
+    def _log_receipt(self, src_path: str, message: str) -> None:
+        """Buffer an audit trail entry for a file operation.
+        
+        Receipts are grouped by source folder and written at the end
+        to minimize filesystem operations.
+        
+        Args:
+            src_path: Original file path (used to determine source folder).
+            message: Operation description to record in audit trail.
+        """
         parent = os.path.dirname(src_path)
         self.receipt_buffer[parent].append(message)
 
-    def _write_trace_receipts(self):
+    def _write_trace_receipts(self) -> None:
+        """Write buffered audit trails to image_trace.txt files.
+        
+        Creates or appends to image_trace.txt in each source folder that had
+        operations, documenting all file movements with timestamp.
+        """
         if not self.receipt_buffer:
             self.logger.info("No files moved, so no receipts written.")
             return

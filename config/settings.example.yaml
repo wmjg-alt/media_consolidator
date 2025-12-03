@@ -21,7 +21,6 @@ extensions:
     - '.ico'
     - '.jfif'
     - '.avif'
-    # RAW Formats (Canon, Nikon, Sony, Fuji, Olympus, Panasonic, Adobe)
     - '.raw'
     - '.arw'
     - '.cr2'
@@ -43,7 +42,6 @@ extensions:
     - '.mkv'
     - '.m4v'
     - '.webm'
-    # Legacy / Windows / Camcorder
     - '.wmv'
     - '.mpg'
     - '.mpeg'

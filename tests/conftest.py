@@ -46,7 +46,7 @@ def mock_config(temp_roots):
             "videos": [".mp4"]
         },
         "hashing": {
-            "chunk_size": 1024 # Small chunk for fast tests
+            "chunk_size": 1024 
         },
         "organization": {
             "target_root": str(temp_roots["target"]),

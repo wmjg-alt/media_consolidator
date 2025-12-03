@@ -1,45 +1,58 @@
-import os
+"""File fingerprinting and duplicate detection using content hashing."""
+
 import logging
+import os
+from typing import Any
+
 import xxhash
-from typing import List, Tuple
+
 from src.db import DatabaseManager
 
+
 class Fingerprinter:
-    """
-    Computes file hashes to identify duplicates.
-    Implements a 'Funnel' strategy to minimize Disk IO.
+    """Compute file hashes to identify duplicate content.
+    
+    Implements a progressive four-stage funnel strategy to minimize disk I/O:
+    
+    1. Unique sizes: Files with unique file sizes cannot be duplicates
+    2. Partial hashes: Compare start and end chunks of same-sized files
+    3. Unique partials: Files with unique partial hashes cannot be duplicates
+    4. Full hashes: Complete file hashing for remaining candidates
+    
+    This approach avoids expensive full-file reads until necessary.
     """
 
-    def __init__(self, db: DatabaseManager, config: dict):
+    def __init__(self, db: DatabaseManager, config: dict[str, Any]) -> None:
+        """Initialize the fingerprinter.
+        
+        Args:
+            db: Database manager instance.
+            config: Configuration dictionary containing hashing.chunk_size.
+        """
         self.db = db
         self.logger = logging.getLogger("MediaConsolidator.Hasher")
         self.chunk_size = config.get("hashing", {}).get("chunk_size", 4096)
 
-    def process_database(self):
-        """
-        Main execution pipeline.
-        Runs the 4-stage funnel: Size -> Partial -> Unique Partials -> Full.
+    def process_database(self) -> None:
+        """Execute the complete four-stage fingerprinting pipeline.
+        
+        Processes all unfinished files through the funnel stages, moving
+        qualified candidates forward and marking completed files.
         """
         self.logger.info("Starting Fingerprinting process...")
         
-        # Stage 1: Mark files with unique sizes as processed (no hashing needed)
         self._mark_unique_sizes()
-        
-        # Stage 2: Calculate Partial Hashes for size collisions
         self._process_partial_hashes()
-        
-        # Stage 3: If partial hash is unique, mark as processed (FIX for Limbo files)
         self._mark_unique_partials()
-        
-        # Stage 4: Calculate Full Hashes for partial collisions
         self._process_full_hashes()
         
         self.logger.info("Fingerprinting complete.")
 
-    def _mark_unique_sizes(self):
-        """
-        Optimization: If a file size appears only once in the DB, 
-        it cannot be a duplicate. Mark it as hashed.
+    def _mark_unique_sizes(self) -> None:
+        """Identify files with unique sizes and mark as fully processed.
+        
+        Files with file sizes that appear only once in the database cannot
+        be duplicates, so they are marked as hashed without computing any hashes.
         """
         sql = """
         UPDATE media_files
@@ -59,9 +72,12 @@ class Fingerprinter:
                 self.logger.info(f"Skipped hashing for {cursor.rowcount} files with unique sizes.")
             conn.commit()
 
-    def _process_partial_hashes(self):
-        """
-        Finds unhashed files that share a file_size, computes partial hash.
+    def _process_partial_hashes(self) -> None:
+        """Compute partial hashes for files sharing sizes.
+        
+        Reads start and end chunks of files that share the same file size,
+        allowing efficient detection of non-duplicates before full reads.
+        Small files (≤2 chunks) use only the start chunk.
         """
         sql_select = """
         SELECT id, file_path, file_size FROM media_files
@@ -73,7 +89,7 @@ class Fingerprinter:
         AND hashed = 0
         """
         
-        updates = []
+        updates: list[tuple[str, int]] = []
         with self.db.get_connection() as conn:
             cursor = conn.execute(sql_select)
             rows = cursor.fetchall()
@@ -90,13 +106,12 @@ class Fingerprinter:
                 conn.executemany("UPDATE media_files SET hash_partial = ? WHERE id = ?", updates)
                 conn.commit()
 
-    def _mark_unique_partials(self):
+    def _mark_unique_partials(self) -> None:
+        """Identify files with unique partial hashes and mark as processed.
+        
+        Among files sharing the same size, if a partial hash is unique,
+        the file cannot be a duplicate and is marked as complete.
         """
-        Optimization: If a partial hash is unique (among sharing sizes), 
-        it cannot be a duplicate. Mark as hashed.
-        """
-        # We look for files that have a Partial Hash, are NOT yet done, 
-        # and that partial hash appears only once for that specific file size.
         sql = """
         UPDATE media_files
         SET hashed = 1
@@ -114,9 +129,11 @@ class Fingerprinter:
                 self.logger.info(f"Marked {cursor.rowcount} unique partial hashes as processed.")
             conn.commit()
 
-    def _process_full_hashes(self):
-        """
-        Finds files where (Size + Partial) match, computes full hash.
+    def _process_full_hashes(self) -> None:
+        """Compute full hashes for high-probability duplicates.
+        
+        Files where both file size and partial hash match are likely duplicates.
+        Complete content hashes provide definitive duplicate identification.
         """
         sql_select = """
         SELECT id, file_path FROM media_files
@@ -128,7 +145,7 @@ class Fingerprinter:
         AND hash_full IS NULL
         """
         
-        updates = []
+        updates: list[tuple[str, int, int]] = []
         with self.db.get_connection() as conn:
             cursor = conn.execute(sql_select)
             rows = cursor.fetchall()
@@ -145,7 +162,20 @@ class Fingerprinter:
                 conn.executemany("UPDATE media_files SET hash_full = ?, hashed = ? WHERE id = ?", updates)
                 conn.commit()
 
-    def _compute_partial_hash(self, path: str, file_size: int) -> str:
+    def _compute_partial_hash(self, path: str, file_size: int) -> str | None:
+        """Compute a partial hash from start and end chunks of a file.
+        
+        Reads the first chunk and (if file is large enough) the last chunk,
+        then hashes them together. This provides fast duplicate detection
+        without reading the entire file.
+        
+        Args:
+            path: File path to hash.
+            file_size: Size of the file in bytes.
+            
+        Returns:
+            Hex digest string if successful, None if file could not be read.
+        """
         try:
             with open(path, 'rb') as f:
                 start_chunk = f.read(self.chunk_size)
@@ -163,7 +193,18 @@ class Fingerprinter:
             self.logger.error(f"Could not read file: {path}")
             return None
 
-    def _compute_full_hash(self, path: str) -> str:
+    def _compute_full_hash(self, path: str) -> str | None:
+        """Compute a complete content hash of a file.
+        
+        Reads the entire file in chunks and produces a definitive hash
+        for duplicate identification.
+        
+        Args:
+            path: File path to hash.
+            
+        Returns:
+            Hex digest string if successful, None if file could not be read.
+        """
         try:
             hasher = xxhash.xxh64()
             with open(path, 'rb') as f:
