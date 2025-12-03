@@ -1,0 +1,83 @@
+app:
+  name: "MediaConsolidator"
+  db_name: "media_index.db"
+  log_level: "INFO"
+  log_dir: "logs"
+
+extensions:
+  images: 
+    # Standard
+    - '.jpg'
+    - '.jpeg'
+    - '.png'
+    - '.heic'
+    - '.heif'
+    - '.webp'
+    - '.tiff'
+    - '.tif'
+    - '.bmp'
+    - '.gif'
+    - '.svg'
+    - '.ico'
+    - '.jfif'
+    - '.avif'
+    # RAW Formats (Canon, Nikon, Sony, Fuji, Olympus, Panasonic, Adobe)
+    - '.raw'
+    - '.arw'
+    - '.cr2'
+    - '.cr3'
+    - '.nef'
+    - '.dng'
+    - '.orf'
+    - '.raf'
+    - '.rw2'
+    - '.pef'
+    - '.srw'
+    - '.sr2'
+  
+  videos:
+    # Standard
+    - '.mp4'
+    - '.mov'
+    - '.avi'
+    - '.mkv'
+    - '.m4v'
+    - '.webm'
+    # Legacy / Windows / Camcorder
+    - '.wmv'
+    - '.mpg'
+    - '.mpeg'
+    - '.m2ts'
+    - '.mts'
+    - '.3gp'
+    - '.flv'
+
+hashing:
+  chunk_size: 4096
+
+organization:
+  target_root: "C:/OrganizedPhotos"
+  trash_folder: "C:/OrganizedPhotos/_TRASH" 
+  date_format: "%Y-%m-%d"
+  filename_template: "{date}_{name}_from_{folder}"  # Available keys: {date}, {name}, {folder} adjust in librarian.py if needed
+  
+  # Safety Exclusions (Folder names to skip entirely)
+  exclude_dirs:
+    - "Windows"
+    - "Program Files"
+    - "Program Files (x86)"
+    - "ProgramData"
+    - "AppData"
+    - "$RECYCLE.BIN"
+    - "System Volume Information"
+    - "Steam"
+    - "Epic Games"
+    - ".git"
+    - ".vs"
+    - "__pycache__"
+
+# Source Directories to Scan
+  source_dirs:
+    - "D:/Backups/..."
+    - "E:/Photos/..."
+    - "C:/Users/username/Pictures/..."

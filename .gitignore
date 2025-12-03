@@ -1,0 +1,19 @@
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.pytest_cache/
+
+# Project Logs and Databases
+logs/
+*.log
+*.db
+*.db-journal
+
+# Configuration (Keep personal paths private)
+config/settings.yaml
+
