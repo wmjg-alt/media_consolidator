@@ -7,6 +7,7 @@ from typing import Any
 from PIL import Image
 
 from src.db import DatabaseManager
+from src.utils import resolve_best_timestamp 
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -128,9 +129,10 @@ class Analyzer:
             created = item[3]
             modified = item[4]
             path = item[1]
-            filename = os.path.basename(path)
             
-            effective_date = min(created, modified)
+            effective_date = resolve_best_timestamp(created, modified)
+            
+            filename = os.path.basename(path)
             name_penalty = -100 if "copy" in filename.lower() or "(" in filename else 0
             
             return (-score, effective_date, -name_penalty, len(path))

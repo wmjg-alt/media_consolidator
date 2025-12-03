@@ -3,11 +3,13 @@
 import logging
 import os
 import shutil
+import time
 from collections import defaultdict
 from datetime import datetime
 from typing import Any
 
 from src.db import DatabaseManager
+from src.utils import set_file_creation_time, apply_jitter_if_midnight, resolve_best_timestamp
 
 
 class Executioner:
@@ -58,20 +60,44 @@ class Executioner:
     def _process_keepers(self) -> None:
         """Move files marked KEEP to their organized target locations.
         
-        Only writes audit receipts for files that were actually moved,
-        skipping receipts for files already in place or that failed to move.
+        Also updates the metadata of the moved file:
+        1. Sets Creation Time to the oldest known date (jittered if midnight).
+        2. Restores original Modified Time.
         """
-        sql = """SELECT id, file_path, target_path FROM media_files 
+        # UPDATED SQL: Fetch timestamps
+        sql = """SELECT id, file_path, target_path, created_at, modified_at 
+                 FROM media_files 
                  WHERE disposition = 'KEEP' AND target_path IS NOT NULL"""
+        
         with self.db.get_connection() as conn:
             rows = conn.execute(sql).fetchall()
             self.logger.info(f"Processing {len(rows)} Keepers...")
-            for row_id, src, dst in rows:
+            
+            for row_id, src, dst, c_time, m_time in rows:
                 if self.dry_run:
                     self.logger.info(f"[DRY] Move: '{src}' -> '{dst}'")
                     continue
                 
                 if self._safe_move(src, dst):
+                    # --- METADATA UPDATE START ---
+                    try:
+                        # 1. Determine oldest known date
+                        best_ts = resolve_best_timestamp(c_time, m_time)
+                        
+                        # 2. Apply Jitter if exact midnight
+                        final_creation_ts = apply_jitter_if_midnight(best_ts)
+                        
+                        # 3. Set Creation Time (Win32)
+                        set_file_creation_time(dst, final_creation_ts)
+                        
+                        # 4. Restore Modified Time (Legacy preservation)
+                        # os.utime sets (atime, mtime). We use current for access.
+                        os.utime(dst, (time.time(), m_time))
+                        
+                    except Exception as e:
+                        self.logger.warning(f"Metadata fix failed for {dst}: {e}")
+                    # --- METADATA UPDATE END ---
+
                     self._log_receipt(src, f"[MOVED] '{os.path.basename(src)}' -> '{dst}'")
 
     def _process_deletes(self) -> None:

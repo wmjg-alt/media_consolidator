@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from src.db import DatabaseManager
+from src.utils import resolve_best_timestamp 
 
 
 class Librarian:
@@ -82,7 +83,7 @@ class Librarian:
 
             for row_id, src_path, c_time, m_time, ext in rows:
                 # Step 1: Determine best date for organization
-                best_ts = min(c_time, m_time)
+                best_ts = resolve_best_timestamp(c_time, m_time)
                 dt = datetime.fromtimestamp(best_ts)
                 
                 year_folder = dt.strftime("%Y")

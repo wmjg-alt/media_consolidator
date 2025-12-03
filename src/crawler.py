@@ -2,19 +2,37 @@
 
 import logging
 import os
+import stat
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
 from src.db import DatabaseManager
 
+_BUILTIN_EXCLUDE_PREFIXES = {
+    "programfiles",
+    "appdata",
+    "windows",
+    "system",
+    "temp",
+    "pagefile",
+    "hiberfil",
+    "recycler",
+    "node_modules",
+}
+
 
 class FileCrawler:
     """Recursively scan directories and index media files into the database.
     
-    Filters files by allowed extensions and applies exclusion rules for system
-    directories, trash folders, and user-specified blocklists. Uses batch
-    insertion for efficient database writes.
+    Filters files by allowed extensions and applies intelligent exclusion rules:
+    - System/hidden directories ($ or . prefix)
+    - Junctions and symlinks (prevents loops and unnecessary traversal)
+    - System attribute detection (Windows system folders)
+    - Built-in patterns (ProgramFiles, AppData, etc.)
+    - Trash folders and user-specified blocklists
+    
+    Uses batch insertion for efficient database writes.
     """
 
     def __init__(self, db: DatabaseManager, config: dict[str, Any]) -> None:
@@ -26,6 +44,7 @@ class FileCrawler:
                 - extensions: Dict mapping file types to extension lists
                 - organization.trash_folder: Path to exclude from scanning
                 - organization.exclude_dirs: List of directory names to skip
+                  (supports exact matches and prefix patterns)
         """
         self.db = db
         self.logger = logging.getLogger("MediaConsolidator.Crawler")
@@ -105,10 +124,13 @@ class FileCrawler:
     def _fast_scandir(self, path: str) -> Generator[os.DirEntry[str], None, None]:
         """Recursively scan directory tree, yielding file entries.
         
-        Applies three exclusion rules to filter out unwanted paths:
-        1. Trash folder: Skip configured trash_folder path entirely
-        2. System/config dirs: Skip directories starting with $ or .
-        3. Explicit blocklist: Skip directories matching excluded_names
+        Applies intelligent exclusion rules to skip unnecessary directories:
+        1. Symlinks/Junctions: Skip to prevent loops and redundant scanning
+        2. Hidden/System: Skip directories starting with $ or .
+        3. System attributes: Skip folders marked with Windows SYSTEM attribute
+        4. Built-in patterns: Skip common OS/app folders (ProgramFiles, AppData, etc.)
+        5. User blocklist: Skip explicitly configured directory names
+        6. Trash folder: Skip configured trash_folder path entirely
         
         Args:
             path: Directory path to scan.
@@ -120,12 +142,15 @@ class FileCrawler:
             with os.scandir(path) as it:
                 for entry in it:
                     if entry.is_dir(follow_symlinks=False):
+                        if entry.is_symlink():
+                            continue
+                        
                         name_lower = entry.name.lower()
                         
                         if name_lower.startswith('$') or name_lower.startswith('.'):
                             continue
                         
-                        if name_lower in self.excluded_names:
+                        if self._should_exclude_dir(name_lower, entry.path):
                             continue
                             
                         yield from self._fast_scandir(entry.path)
@@ -133,6 +158,38 @@ class FileCrawler:
                         yield entry
         except (PermissionError, OSError):
             pass
+
+    def _should_exclude_dir(self, name_lower: str, dir_path: str) -> bool:
+        """Determine if a directory should be excluded from scanning.
+        
+        Checks against: user exclusion list, built-in patterns, Windows system
+        attribute, and trash folder path.
+        
+        Args:
+            name_lower: Directory name in lowercase.
+            dir_path: Full directory path.
+            
+        Returns:
+            True if the directory should be skipped, False to recurse into it.
+        """
+        if name_lower in self.excluded_names:
+            return True
+        
+        if any(name_lower.startswith(prefix) for prefix in _BUILTIN_EXCLUDE_PREFIXES):
+            return True
+        
+        if self.trash_path and dir_path.replace('\\', '/').startswith(self.trash_path):
+            return True
+        
+        try:
+            file_stat = os.stat(dir_path)
+            is_system = file_stat.st_file_attributes & stat.FILE_ATTRIBUTE_SYSTEM
+            if is_system:
+                return True
+        except (AttributeError, OSError):
+            pass
+        
+        return False
 
     def _is_media(self, filename: str) -> bool:
         """Check if a file has an allowed media extension.

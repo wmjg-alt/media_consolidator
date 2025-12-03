@@ -6,7 +6,9 @@ from typing import Any
 
 import xxhash
 
+    
 from src.db import DatabaseManager
+from src.cache import HashCache 
 
 
 class Fingerprinter:
@@ -32,6 +34,9 @@ class Fingerprinter:
         self.db = db
         self.logger = logging.getLogger("MediaConsolidator.Hasher")
         self.chunk_size = config.get("hashing", {}).get("chunk_size", 4096)
+
+        target_root = config.get("organization", {}).get("target_root", ".")
+        self.cache = HashCache(target_root)
 
     def process_database(self) -> None:
         """Execute the complete four-stage fingerprinting pipeline.
@@ -132,11 +137,12 @@ class Fingerprinter:
     def _process_full_hashes(self) -> None:
         """Compute full hashes for high-probability duplicates.
         
-        Files where both file size and partial hash match are likely duplicates.
-        Complete content hashes provide definitive duplicate identification.
+        Checks the persistent cache first to avoid re-reading files that have
+        been processed in previous runs.
         """
+        
         sql_select = """
-        SELECT id, file_path FROM media_files
+        SELECT id, file_path, file_size, hash_partial FROM media_files
         WHERE (file_size, hash_partial) IN (
             SELECT file_size, hash_partial FROM media_files
             WHERE hash_partial IS NOT NULL
@@ -151,12 +157,26 @@ class Fingerprinter:
             rows = cursor.fetchall()
             
             if rows:
-                self.logger.info(f"Computing Full Hashes for {len(rows)} high-probability duplicates...")
+                self.logger.info(f"Resolving Full Hashes for {len(rows)} high-probability duplicates...")
             
-            for row_id, path in rows:
-                f_hash = self._compute_full_hash(path)
-                if f_hash:
-                    updates.append((f_hash, 1, row_id))
+            cache_hits = 0
+            
+            for row_id, path, size, p_hash in rows:
+                # 1. Check Cache
+                cached_full = self.cache.get_full_hash(size, p_hash)
+                
+                if cached_full:
+                    updates.append((cached_full, 1, row_id))
+                    cache_hits += 1
+                else:
+                    # 2. Compute and Cache
+                    f_hash = self._compute_full_hash(path)
+                    if f_hash:
+                        self.cache.put_full_hash(size, p_hash, f_hash)
+                        updates.append((f_hash, 1, row_id))
+
+            if cache_hits > 0:
+                self.logger.info(f"Cache Hits: {cache_hits} files skipped full reading.")
 
             if updates:
                 conn.executemany("UPDATE media_files SET hash_full = ?, hashed = ? WHERE id = ?", updates)
