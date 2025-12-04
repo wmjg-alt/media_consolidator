@@ -175,6 +175,9 @@ class FileCrawler:
         if name_lower in self.excluded_names:
             return True
         
+        if name_lower.startswith("."):
+            return True
+        
         if any(name_lower.startswith(prefix) for prefix in _BUILTIN_EXCLUDE_PREFIXES):
             return True
         
